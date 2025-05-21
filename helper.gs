@@ -30,7 +30,6 @@ function onOpen() {
     .addItem('📦 Start from Jurnal Invoice Items(90d)', 'fetchJurnalInvoiceItems')
     .addItem('📦 Send weekly restock email', 'sendWeeklyRestockEmail')
     .addItem('🔁 Reorder Sheets', 'reorderSheets')
-    .addItem("🤖 Get GPT Response", "runGPTandWriteToSheet")
     .addToUi();
 }
 
