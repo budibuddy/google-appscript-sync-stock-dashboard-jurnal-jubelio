@@ -562,6 +562,7 @@ function fetchJubelioStock() {
   }
 }
 
+/** Step 5: Generate Restock Dasboard from step 3 and 4 data (daily) */
 function generateRestockDashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const stockSheet = ss.getSheetByName("Jubelio_Stock");
@@ -774,7 +775,7 @@ function postDailyJurnalSubtractionsToJubelio() {
     item_adj_id: 0,
     item_adj_no: "[auto]",
     transaction_date: new Date().toISOString(),
-    note: "[AUTO] Daily sales subtraction from offline Jurnal",
+    note: "[AUTO MIN] Daily sales subtraction from offline Jurnal",
     location_id: -1,
     is_opening_balance: false,
     items: validItems
@@ -807,5 +808,83 @@ function postDailyJurnalSubtractionsToJubelio() {
     Logger.log(e.message);
   }
   // ✅ Trigger fresh stock fetch and regenerate dashboard
+  fetchJubelioStock();
+}
+
+/** Add Jurnal purchases to jubelio stock(daily) */
+function postDailyJurnalAdditionsToJubelio() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("JURNAL_Purchase_Daily");
+  const data = sheet.getRange(2, 8, sheet.getLastRow() - 1, 4).getValues(); // Columns H–K: item_id, item_code, name, quantity
+
+  const validItems = data
+    .filter(row => row[0] && !isNaN(row[0]) && !isNaN(row[3])) // Ensure item_id and qty are valid numbers
+    .map(row => {
+      const itemId = Number(row[0]);
+      const qty = Number(row[3]);
+
+      if (qty <= 0) return null; // Skip if quantity is 0 or negative
+
+      return {
+        item_adj_detail_id: 0,
+        item_id: itemId,
+        description: "Add Jurnal purchases",
+        serial_no: null,
+        batch_no: null,
+        qty_in_base: qty, // POSITIVE value
+        original_item_adj_detail_id: 0,
+        unit: "Buah",
+        amount: 0,
+        location_id: -1,
+        account_id: 75,
+        expired_date: null,
+        bin_id: 3,
+        cost: 0
+      };
+    })
+    .filter(item => item !== null);
+
+  if (validItems.length === 0) {
+    Logger.log("🚫 No items to add from purchase summary.");
+    return;
+  }
+
+  const payload = {
+    item_adj_id: 0,
+    item_adj_no: "[auto]",
+    transaction_date: new Date().toISOString(),
+    note: "[AUTO ADD] Daily stock addition from Jurnal purchases",
+    location_id: -1,
+    is_opening_balance: false,
+    items: validItems
+  };
+
+  const token = loginToJubelioWMS();
+  if (!token) {
+    Logger.log("❌ Failed to authenticate with Jubelio.");
+    return;
+  }
+
+  const url = `${JUBE_API_BASE}/inventory/adjustments/`;
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: getJubelioAuthHeaders(token),
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    Logger.log("📦 Payload to Jubelio:");
+    Logger.log(JSON.stringify(payload, null, 2));
+    const response = UrlFetchApp.fetch(url, options);
+    const result = JSON.parse(response.getContentText());
+    Logger.log("✅ Stock addition submitted:");
+    Logger.log(result);
+  } catch (e) {
+    Logger.log("❌ Error submitting addition:");
+    Logger.log(e.message);
+  }
+
+  // Optional: Refresh stock cache/dashboard
   fetchJubelioStock();
 }

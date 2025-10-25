@@ -30,6 +30,7 @@ function onOpen() {
     .addItem('📦 Start from Jurnal Invoice Items(90d)', 'fetchJurnalInvoiceItems')
     .addItem('📦 Send weekly restock email', 'sendWeeklyRestockEmail')
     .addItem('🔁 Reorder Sheets', 'reorderSheets')
+    .addItem("🤖 Get GPT Response", "runGPTandWriteToSheet")
     .addToUi();
 }
 
@@ -79,7 +80,7 @@ function getConfigValue(key) {
 /** Reorder sheets from clean to raw */
 function reorderSheets() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const desiredOrder = ["Restock Dashboard", "Config", "Jurnal_Avg_Price", "Jubelio_Stock", "JURNAL_Sales_Daily", "Jurnal_WH_Transfers", "Jurnal_Sales_90d", "Jubelio_Sales_90d", "Jurnal_Invoice_Items", "Jubelio_Invoice_Items", "Jubelio_Invoices"];
+  const desiredOrder = ["Restock Dashboard", "Config", "Jurnal_Avg_Price", "Jubelio_Stock", "JURNAL_Purchase_Daily", "JURNAL_Sales_Daily", "Jurnal_WH_Transfers", "Jurnal_Sales_90d", "Jubelio_Sales_90d", "Jurnal_Invoice_Items", "Jubelio_Invoice_Items", "Jubelio_Invoices"];
 
   desiredOrder.forEach((sheetName, index) => {
     const sheet = ss.getSheetByName(sheetName);
@@ -96,7 +97,7 @@ function reorderSheets() {
   ss.setActiveSheet(restockDashboardSheet);  
 }
 
-/** Helper to format date */
+/** Helper to format timestamps nicely */
 function formatDDMMYYYY(date) {
   const dd = String(date.getDate()).padStart(2, "0");
   const mm = String(date.getMonth() + 1).padStart(2, "0");

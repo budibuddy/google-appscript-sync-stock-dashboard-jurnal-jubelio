@@ -565,7 +565,7 @@ function fetchJurnalAvgPriceFromSales() {
 
   const endDate = new Date();
   const startDate = new Date();
-  startDate.setDate(endDate.getDate() - 90);
+  startDate.setDate(endDate.getDate() - 180);
 
   const startDateStr = formatDDMMYYYY(startDate);
   const endDateStr = formatDDMMYYYY(endDate);
@@ -642,4 +642,186 @@ function fetchJurnalAvgPriceFromSales() {
     sheet.getRange("I3").setValue("Error");
     sheet.getRange("I4").setValue(error.message);
   }
+}
+
+/** Fetch Jurnal Purchases and summarize (daily) */
+function syncJurnalDailyPurchases() {
+  const targetSheetName = "JURNAL_Purchase_Daily";
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(targetSheetName) || ss.insertSheet(targetSheetName);
+
+  // Reset and setup header
+  sheet.clear();
+  sheet.appendRow(["Date", "Product Name", "Product Code", "Qty Purchased"]);
+
+  const page = 1;
+  const pageSize = 100;
+  const requestPath = `/public/jurnal/api/v1/purchase_invoices?page=${page}&page_size=${pageSize}`;
+  const fullUrl = JURNAL_API_BASE + requestPath;
+  const headers = getJurnalHmacHeaders("GET", requestPath); // Assuming you already have this function
+
+  const response = UrlFetchApp.fetch(fullUrl, {
+    method: "GET",
+    headers,
+    muteHttpExceptions: true
+  });
+
+  if (response.getResponseCode() !== 200) {
+    Logger.log("❌ Failed to fetch purchase data: " + response.getContentText());
+    SpreadsheetApp.getActive().toast("❌ Error fetching Jurnal purchases.");
+    return;
+  }
+
+  const data = JSON.parse(response.getContentText());
+  const purchases = data.purchase_invoices || [];
+  const today = new Date();
+  const ninetyDaysAgo = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+  const purchaseMap = {};
+
+  purchases.forEach(inv => {
+    const rawDate = inv.transaction_date || "";
+    const [day, month, year] = rawDate.split("/").map(str => parseInt(str, 10));
+    const parsedDate = new Date(year, month - 1, day);
+    if (parsedDate < ninetyDaysAgo) return;
+
+    const lines = inv.transaction_lines_attributes || [];
+
+    lines.forEach(line => {
+      const product = line.product || {};
+      const name = product.name || "Unnamed Product";
+      const code = product.product_code || product.code || "";
+      const qty = parseFloat(line.quantity || 0);
+
+      const dateKey = Utilities.formatDate(parsedDate, Session.getScriptTimeZone(), "dd/MM/yyyy");
+      const key = `${dateKey}|||${name}|||${code}`;
+      if (!purchaseMap[key]) {
+        purchaseMap[key] = {
+          date: dateKey,
+          name,
+          code,
+          qty: 0
+        };
+      }
+      purchaseMap[key].qty += qty;
+    });
+  });
+
+  const rows = Object.values(purchaseMap).map(p => [
+    p.date, p.name, p.code, p.qty
+  ]);
+
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, 4).setValues(rows);
+    sheet.getRange(2, 1, rows.length, 4).sort([
+      { column: 1, ascending: false },
+      { column: 4, ascending: false }
+    ]);
+  }
+
+  sheet.getRange("F1").setValue("Last Updated");
+  sheet.getRange("F2").setValue(new Date());
+  Logger.log(`✅ Jurnal daily purchase summary generated. Rows: ${rows.length}`);
+  summarizeTodayJurnalInbound()
+}
+
+/** Combine purchases and WH transfer to get daily INBOUND (daily) */
+function summarizeTodayJurnalInbound() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("JURNAL_Purchase_Daily");
+  const transferSheet = ss.getSheetByName("Jurnal_WH_Transfers");
+  const todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy");
+  
+  // if want to test out previous days
+  //const yesterday = new Date();
+  //yesterday.setDate(yesterday.getDate() - 1);
+  //const todayStr = Utilities.formatDate(yesterday, Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+  const itemIdMap = getItemIdMapFromStockSheet(); // { item_code: item_id }
+  const inboundMap = {}; // key: code || name → { id, code, name, qty }
+
+  // === 1. From Purchase Summary Sheet ===
+  const data = sheet.getDataRange().getValues();
+  const header = data[0];
+  const rows = data.slice(1);
+
+  const idxDate = header.indexOf("Date");
+  const idxName = header.indexOf("Product Name");
+  const idxCode = header.indexOf("Product Code");
+  const idxQty = header.indexOf("Qty Purchased");
+
+  for (const row of rows) {
+    const rawDate = row[idxDate];
+    if (!rawDate) continue;
+    const dateStr = Utilities.formatDate(new Date(rawDate), Session.getScriptTimeZone(), "dd/MM/yyyy");
+    if (dateStr !== todayStr) continue;
+
+    const name = String(row[idxName] || "").trim();
+    const code = String(row[idxCode] || "").toUpperCase().trim();
+    const qty = Number(row[idxQty]) || 0;
+    const key = code || name;
+    const id = code ? (itemIdMap[code] || "") : "";
+
+    if (!inboundMap[key]) {
+      inboundMap[key] = { id, code, name, qty };
+    } else {
+      inboundMap[key].qty += qty;
+    }
+  }
+
+  // === 2. From Warehouse Transfers (Unassigned → Aneka MGK or Supplier → Aneka MGK) ===
+  const transferData = transferSheet.getDataRange().getValues();
+  const transferHeaders = transferData[0];
+  const transferRows = transferData.slice(1);
+
+  const idxTransferDate = transferHeaders.indexOf("Date");
+  const idxFromWh = transferHeaders.indexOf("From Warehouse");
+  const idxToWh = transferHeaders.indexOf("To Warehouse");
+  const idxTransferCode = transferHeaders.indexOf("Product Code");
+  const idxTransferName = transferHeaders.indexOf("Product Name");
+  const idxTransferQty = transferHeaders.indexOf("Quantity");
+
+  for (const row of transferRows) {
+    const rawDate = row[idxTransferDate];
+    if (!rawDate) continue;
+
+    const dateStr = Utilities.formatDate(new Date(rawDate), Session.getScriptTimeZone(), "dd/MM/yyyy");
+    if (dateStr !== todayStr) continue;
+
+    const fromWh = String(row[idxFromWh]).trim();
+    const toWh = String(row[idxToWh]).trim();
+    if (!(fromWh === "Aneka MGK" && toWh === "Unassigned")) continue;
+
+    const name = String(row[idxTransferName] || "").trim();
+    const code = String(row[idxTransferCode] || "").toUpperCase().trim();
+    const qty = Number(row[idxTransferQty]) || 0;
+    const key = code || name;
+    const id = code ? (itemIdMap[code] || "") : "";
+
+    if (!inboundMap[key]) {
+      inboundMap[key] = { id, code, name, qty };
+    } else {
+      inboundMap[key].qty += qty;
+    }
+  }
+
+  // === 3. Output to columns F–I of the same sheet ===
+  const summary = Object.values(inboundMap).map(item => [
+    item.id, item.code, item.name, item.qty
+  ]);
+
+  const startCol = 8; // Column H
+  const maxRowsToClear = 100;
+  sheet.getRange(1, startCol, 1, 4).setValues([["item_id", "item_code", "name", "quantity"]]);
+  sheet.getRange(2, startCol, maxRowsToClear, 4).clearContent();
+
+  if (summary.length > 0) {
+    sheet.getRange(2, startCol, summary.length, 4).setValues(summary);
+  }
+
+  sheet.getRange("M1").setValue("Inbound Last Updated");
+  sheet.getRange("M2").setValue(new Date());
+
+  Logger.log(`✅ Inbound summary updated. ${summary.length} SKUs.`);
+  postDailyJurnalAdditionsToJubelio();
 }
